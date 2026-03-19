@@ -1,0 +1,764 @@
+-- ============================================================
+-- QUICKO RIDE-HAILING PLATFORM
+-- Complete Database Schema + RLS Policies
+-- PostgreSQL / Supabase
+-- ============================================================
+
+
+-- ============================================================
+-- ENUMS
+-- ============================================================
+
+CREATE TYPE user_role       AS ENUM ('rider', 'driver');
+CREATE TYPE driver_status   AS ENUM ('pending', 'approved', 'rejected', 'suspended');
+CREATE TYPE duty_status     AS ENUM ('on_duty', 'off_duty');
+CREATE TYPE vehicle_type    AS ENUM ('bike', 'auto', 'cab');
+CREATE TYPE ownership_type  AS ENUM ('self', 'rented');
+CREATE TYPE document_type   AS ENUM (
+    'dl_front', 'dl_back',
+    'rc_front', 'rc_back',
+    'aadhaar_front', 'aadhaar_back', 'pan'
+);
+CREATE TYPE doc_status      AS ENUM ('pending', 'approved', 'rejected');
+CREATE TYPE trip_status     AS ENUM (
+    'requested', 'accepted', 'arrived',
+    'ongoing', 'completed', 'cancelled'
+);
+CREATE TYPE txn_type        AS ENUM ('credit', 'debit');
+CREATE TYPE txn_category    AS ENUM (
+    'trip_earning', 'commission', 'withdrawal', 'bonus', 'refund'
+);
+
+
+-- ============================================================
+-- TABLES
+-- ============================================================
+
+-- riders
+CREATE TABLE riders (
+    id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    auth_id     UUID        NOT NULL UNIQUE REFERENCES auth.users(id) ON DELETE CASCADE,
+    phone       TEXT        NOT NULL UNIQUE,
+    name        TEXT,
+    email       TEXT,
+    avatar_url  TEXT,
+    fcm_token   TEXT,
+    is_active   BOOLEAN     NOT NULL DEFAULT TRUE,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_riders_auth_id ON riders(auth_id);
+CREATE INDEX idx_riders_phone   ON riders(phone);
+
+
+-- drivers
+CREATE TABLE drivers (
+    id              UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
+    auth_id         UUID          NOT NULL UNIQUE REFERENCES auth.users(id) ON DELETE CASCADE,
+    phone           TEXT          NOT NULL UNIQUE,
+    name            TEXT          NOT NULL,
+    date_of_birth   DATE,
+    gender          TEXT          CHECK (gender IN ('male', 'female', 'other')),
+    city            TEXT          NOT NULL,
+    vehicle_type    vehicle_type  NOT NULL,
+    status          driver_status NOT NULL DEFAULT 'pending',
+    duty_status     duty_status   NOT NULL DEFAULT 'off_duty',
+    avatar_url      TEXT,
+    fcm_token       TEXT,
+    is_active       BOOLEAN       NOT NULL DEFAULT TRUE,
+    rejection_note  TEXT,
+    approved_at     TIMESTAMPTZ,
+    created_at      TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_drivers_auth_id    ON drivers(auth_id);
+CREATE INDEX idx_drivers_phone      ON drivers(phone);
+CREATE INDEX idx_drivers_city       ON drivers(city);
+CREATE INDEX idx_drivers_status     ON drivers(status);
+CREATE INDEX idx_drivers_duty       ON drivers(duty_status);
+CREATE INDEX idx_drivers_city_duty  ON drivers(city, status, duty_status);
+
+
+-- vehicles
+CREATE TABLE vehicles (
+    id              UUID           PRIMARY KEY DEFAULT gen_random_uuid(),
+    driver_id       UUID           NOT NULL UNIQUE REFERENCES drivers(id) ON DELETE CASCADE,
+    vehicle_number  TEXT           NOT NULL UNIQUE,
+    vehicle_type    vehicle_type   NOT NULL,
+    make            TEXT,
+    model           TEXT,
+    year            INT            CHECK (year BETWEEN 2000 AND 2100),
+    color           TEXT,
+    ownership_type  ownership_type NOT NULL DEFAULT 'self',
+    is_verified     BOOLEAN        NOT NULL DEFAULT FALSE,
+    created_at      TIMESTAMPTZ    NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ    NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_vehicles_driver_id ON vehicles(driver_id);
+
+
+-- driver_documents
+CREATE TABLE driver_documents (
+    id            UUID          PRIMARY KEY DEFAULT gen_random_uuid(),
+    driver_id     UUID          NOT NULL REFERENCES drivers(id) ON DELETE CASCADE,
+    doc_type      document_type NOT NULL,
+    storage_path  TEXT          NOT NULL,
+    public_url    TEXT,
+    status        doc_status    NOT NULL DEFAULT 'pending',
+    admin_note    TEXT,
+    reviewed_by   UUID          REFERENCES auth.users(id),
+    reviewed_at   TIMESTAMPTZ,
+    uploaded_at   TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+    UNIQUE (driver_id, doc_type)
+);
+
+CREATE INDEX idx_driver_docs_driver_id ON driver_documents(driver_id);
+CREATE INDEX idx_driver_docs_status    ON driver_documents(status);
+
+
+-- driver_locations  (one row per driver, upserted)
+CREATE TABLE driver_locations (
+    driver_id   UUID             PRIMARY KEY REFERENCES drivers(id) ON DELETE CASCADE,
+    latitude    DOUBLE PRECISION NOT NULL,
+    longitude   DOUBLE PRECISION NOT NULL,
+    heading     DOUBLE PRECISION,       -- degrees 0-360
+    speed       DOUBLE PRECISION,       -- km/h
+    accuracy    DOUBLE PRECISION,       -- metres
+    updated_at  TIMESTAMPTZ      NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_driver_loc_coords  ON driver_locations(latitude, longitude);
+CREATE INDEX idx_driver_loc_updated ON driver_locations(updated_at DESC);
+
+
+-- ride_requests
+CREATE TABLE ride_requests (
+    id               UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    rider_id         UUID         NOT NULL REFERENCES riders(id),
+    vehicle_type     vehicle_type NOT NULL,
+    pickup_lat       DOUBLE PRECISION NOT NULL,
+    pickup_lng       DOUBLE PRECISION NOT NULL,
+    pickup_address   TEXT,
+    drop_lat         DOUBLE PRECISION NOT NULL,
+    drop_lng         DOUBLE PRECISION NOT NULL,
+    drop_address     TEXT,
+    distance_km      NUMERIC(8,3),
+    estimated_fare   NUMERIC(10,2),
+    status           TEXT         NOT NULL DEFAULT 'searching'
+                     CHECK (status IN ('searching', 'accepted', 'expired', 'cancelled')),
+    expires_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW() + INTERVAL '3 minutes',
+    created_at       TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_ride_req_rider_id ON ride_requests(rider_id);
+CREATE INDEX idx_ride_req_status   ON ride_requests(status);
+CREATE INDEX idx_ride_req_type     ON ride_requests(vehicle_type, status);
+CREATE INDEX idx_ride_req_created  ON ride_requests(created_at DESC);
+
+
+-- trips
+CREATE TABLE trips (
+    id               UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    request_id       UUID         REFERENCES ride_requests(id),
+    rider_id         UUID         NOT NULL REFERENCES riders(id),
+    driver_id        UUID         NOT NULL REFERENCES drivers(id),
+    vehicle_id       UUID         REFERENCES vehicles(id),
+    vehicle_type     vehicle_type NOT NULL,
+    status           trip_status  NOT NULL DEFAULT 'accepted',
+
+    -- Locations
+    pickup_lat       DOUBLE PRECISION NOT NULL,
+    pickup_lng       DOUBLE PRECISION NOT NULL,
+    pickup_address   TEXT,
+    drop_lat         DOUBLE PRECISION NOT NULL,
+    drop_lng         DOUBLE PRECISION NOT NULL,
+    drop_address     TEXT,
+
+    -- Financials
+    distance_km      NUMERIC(8,3),
+    fare             NUMERIC(10,2),
+    surge_multiplier NUMERIC(4,2)  DEFAULT 1.00,
+    final_fare       NUMERIC(10,2),
+    payment_method   TEXT          DEFAULT 'cash'
+                     CHECK (payment_method IN ('cash', 'wallet', 'upi')),
+    payment_status   TEXT          DEFAULT 'pending'
+                     CHECK (payment_status IN ('pending', 'paid', 'failed')),
+
+    -- State timestamps
+    accepted_at      TIMESTAMPTZ,
+    arrived_at       TIMESTAMPTZ,
+    started_at       TIMESTAMPTZ,
+    completed_at     TIMESTAMPTZ,
+    cancelled_at     TIMESTAMPTZ,
+    cancelled_by     TEXT          CHECK (cancelled_by IN ('rider', 'driver', 'system')),
+    cancel_reason    TEXT,
+
+    -- Ratings
+    rider_rating     SMALLINT      CHECK (rider_rating  BETWEEN 1 AND 5),
+    driver_rating    SMALLINT      CHECK (driver_rating BETWEEN 1 AND 5),
+
+    created_at       TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_trips_rider_id    ON trips(rider_id);
+CREATE INDEX idx_trips_driver_id   ON trips(driver_id);
+CREATE INDEX idx_trips_status      ON trips(status);
+CREATE INDEX idx_trips_created     ON trips(created_at DESC);
+CREATE INDEX idx_trips_driver_date ON trips(driver_id, created_at DESC);
+
+
+-- driver_earnings  (one row per completed trip)
+CREATE TABLE driver_earnings (
+    id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    driver_id       UUID        NOT NULL REFERENCES drivers(id) ON DELETE CASCADE,
+    trip_id         UUID        NOT NULL REFERENCES trips(id)   ON DELETE CASCADE,
+    gross_fare      NUMERIC(10,2) NOT NULL,
+    commission_pct  NUMERIC(5,2)  NOT NULL DEFAULT 20.00,
+    commission_amt  NUMERIC(10,2) NOT NULL,
+    net_earning     NUMERIC(10,2) NOT NULL,
+    earned_at       TIMESTAMPTZ   NOT NULL DEFAULT NOW(),
+    UNIQUE (trip_id)
+);
+
+CREATE INDEX idx_earnings_driver_id   ON driver_earnings(driver_id);
+CREATE INDEX idx_earnings_driver_date ON driver_earnings(driver_id, earned_at DESC);
+
+
+-- driver_wallets  (one row per driver)
+CREATE TABLE driver_wallets (
+    driver_id     UUID          PRIMARY KEY REFERENCES drivers(id) ON DELETE CASCADE,
+    balance       NUMERIC(12,2) NOT NULL DEFAULT 0.00,
+    total_earned  NUMERIC(14,2) NOT NULL DEFAULT 0.00,
+    total_paid    NUMERIC(14,2) NOT NULL DEFAULT 0.00,
+    updated_at    TIMESTAMPTZ   NOT NULL DEFAULT NOW()
+);
+
+
+-- wallet_transactions
+CREATE TABLE wallet_transactions (
+    id            UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    driver_id     UUID         NOT NULL REFERENCES drivers(id) ON DELETE CASCADE,
+    trip_id       UUID         REFERENCES trips(id),
+    type          txn_type     NOT NULL,
+    category      txn_category NOT NULL,
+    amount        NUMERIC(10,2) NOT NULL,
+    balance_after NUMERIC(12,2) NOT NULL,
+    description   TEXT,
+    created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_wallet_txn_driver_id   ON wallet_transactions(driver_id);
+CREATE INDEX idx_wallet_txn_driver_date ON wallet_transactions(driver_id, created_at DESC);
+
+
+-- ============================================================
+-- HELPER FUNCTIONS  (used by RLS policies)
+-- ============================================================
+
+CREATE OR REPLACE FUNCTION current_driver_id()
+RETURNS UUID LANGUAGE sql STABLE SECURITY DEFINER AS $$
+    SELECT id FROM drivers WHERE auth_id = auth.uid() LIMIT 1;
+$$;
+
+CREATE OR REPLACE FUNCTION current_rider_id()
+RETURNS UUID LANGUAGE sql STABLE SECURITY DEFINER AS $$
+    SELECT id FROM riders WHERE auth_id = auth.uid() LIMIT 1;
+$$;
+
+-- Admin role is set server-side in auth.users.app_metadata: { "role": "admin" }
+CREATE OR REPLACE FUNCTION is_admin()
+RETURNS BOOLEAN LANGUAGE sql STABLE AS $$
+    SELECT COALESCE(
+        (auth.jwt() -> 'app_metadata' ->> 'role') = 'admin',
+        false
+    );
+$$;
+
+
+-- ============================================================
+-- ROW LEVEL SECURITY
+-- ============================================================
+
+-- ── riders ───────────────────────────────────────────────────
+ALTER TABLE riders ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY riders_select ON riders FOR SELECT
+    USING (auth_id = auth.uid() OR is_admin());
+
+CREATE POLICY riders_insert ON riders FOR INSERT
+    WITH CHECK (auth_id = auth.uid());
+
+CREATE POLICY riders_update ON riders FOR UPDATE
+    USING (auth_id = auth.uid())
+    WITH CHECK (auth_id = auth.uid());
+
+
+-- ── drivers ──────────────────────────────────────────────────
+ALTER TABLE drivers ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY drivers_select ON drivers FOR SELECT
+    USING (auth_id = auth.uid() OR is_admin());
+
+CREATE POLICY drivers_insert ON drivers FOR INSERT
+    WITH CHECK (auth_id = auth.uid());
+
+CREATE POLICY drivers_update ON drivers FOR UPDATE
+    USING (auth_id = auth.uid())
+    WITH CHECK (auth_id = auth.uid());
+-- Note: status changes (approved/rejected) are done via
+--       Edge Function with service_role key (bypasses RLS)
+
+
+-- ── vehicles ─────────────────────────────────────────────────
+ALTER TABLE vehicles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY vehicles_select ON vehicles FOR SELECT
+    USING (driver_id = current_driver_id() OR is_admin());
+
+CREATE POLICY vehicles_insert ON vehicles FOR INSERT
+    WITH CHECK (driver_id = current_driver_id());
+
+CREATE POLICY vehicles_update ON vehicles FOR UPDATE
+    USING (driver_id = current_driver_id());
+
+
+-- ── driver_documents ─────────────────────────────────────────
+ALTER TABLE driver_documents ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY docs_select ON driver_documents FOR SELECT
+    USING (driver_id = current_driver_id() OR is_admin());
+
+CREATE POLICY docs_insert ON driver_documents FOR INSERT
+    WITH CHECK (driver_id = current_driver_id());
+
+CREATE POLICY docs_update ON driver_documents FOR UPDATE
+    USING (driver_id = current_driver_id());
+
+
+-- ── driver_locations ─────────────────────────────────────────
+ALTER TABLE driver_locations ENABLE ROW LEVEL SECURITY;
+
+-- Drivers upsert only their own location
+CREATE POLICY loc_driver_all ON driver_locations FOR ALL
+    USING (driver_id = current_driver_id())
+    WITH CHECK (driver_id = current_driver_id());
+
+-- Riders can see the location of the driver assigned to their active trip
+CREATE POLICY loc_rider_read ON driver_locations FOR SELECT
+    USING (
+        driver_id IN (
+            SELECT driver_id FROM trips
+            WHERE  rider_id = current_rider_id()
+            AND    status   IN ('accepted', 'arrived', 'ongoing')
+        )
+        OR is_admin()
+    );
+
+
+-- ── ride_requests ────────────────────────────────────────────
+ALTER TABLE ride_requests ENABLE ROW LEVEL SECURITY;
+
+-- Riders manage their own requests
+CREATE POLICY req_rider_select ON ride_requests FOR SELECT
+    USING (rider_id = current_rider_id() OR is_admin());
+
+CREATE POLICY req_rider_insert ON ride_requests FOR INSERT
+    WITH CHECK (rider_id = current_rider_id());
+
+CREATE POLICY req_rider_update ON ride_requests FOR UPDATE
+    USING (rider_id = current_rider_id());
+
+-- Approved on-duty drivers can see open requests matching their vehicle type
+CREATE POLICY req_driver_select ON ride_requests FOR SELECT
+    USING (
+        status = 'searching'
+        AND EXISTS (
+            SELECT 1 FROM drivers d
+            WHERE  d.id           = current_driver_id()
+            AND    d.status       = 'approved'
+            AND    d.duty_status  = 'on_duty'
+            AND    d.vehicle_type = ride_requests.vehicle_type
+        )
+    );
+
+
+-- ── trips ────────────────────────────────────────────────────
+ALTER TABLE trips ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY trips_rider_select ON trips FOR SELECT
+    USING (rider_id = current_rider_id() OR is_admin());
+
+CREATE POLICY trips_driver_select ON trips FOR SELECT
+    USING (driver_id = current_driver_id() OR is_admin());
+
+-- Drivers update their own trips (status transitions)
+CREATE POLICY trips_driver_update ON trips FOR UPDATE
+    USING (driver_id = current_driver_id());
+
+-- Riders can update for cancellation / rating only
+CREATE POLICY trips_rider_update ON trips FOR UPDATE
+    USING (rider_id = current_rider_id());
+
+-- INSERT is done via Edge Function with service_role (no client insert policy needed)
+
+
+-- ── driver_earnings ──────────────────────────────────────────
+ALTER TABLE driver_earnings ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY earnings_select ON driver_earnings FOR SELECT
+    USING (driver_id = current_driver_id() OR is_admin());
+
+-- All writes go through Edge Function with service_role
+
+
+-- ── driver_wallets ───────────────────────────────────────────
+ALTER TABLE driver_wallets ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY wallet_select ON driver_wallets FOR SELECT
+    USING (driver_id = current_driver_id() OR is_admin());
+
+-- All writes go through Edge Function with service_role
+
+
+-- ── wallet_transactions ──────────────────────────────────────
+ALTER TABLE wallet_transactions ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY wallet_txn_select ON wallet_transactions FOR SELECT
+    USING (driver_id = current_driver_id() OR is_admin());
+
+-- All writes go through Edge Function with service_role
+
+
+-- ============================================================
+-- STORAGE RLS  (run in Supabase dashboard → Storage policies)
+-- ============================================================
+
+-- Bucket: driver-documents  (private)
+CREATE POLICY storage_driver_upload ON storage.objects FOR INSERT
+    WITH CHECK (
+        bucket_id = 'driver-documents'
+        AND (storage.foldername(name))[1] = current_driver_id()::TEXT
+    );
+
+CREATE POLICY storage_driver_read ON storage.objects FOR SELECT
+    USING (
+        bucket_id = 'driver-documents'
+        AND (
+            (storage.foldername(name))[1] = current_driver_id()::TEXT
+            OR is_admin()
+        )
+    );
+
+-- ============================================================
+-- ATOMIC WALLET CREDIT FUNCTION  (called by Edge Function)
+-- ============================================================
+
+CREATE OR REPLACE FUNCTION credit_driver_wallet(
+    p_driver_id UUID,
+    p_trip_id   UUID,
+    p_amount    NUMERIC
+) RETURNS VOID LANGUAGE plpgsql AS $$
+DECLARE
+    v_new_balance NUMERIC;
+BEGIN
+    UPDATE driver_wallets
+       SET balance      = balance + p_amount,
+           total_earned = total_earned + p_amount,
+           updated_at   = NOW()
+     WHERE driver_id = p_driver_id
+    RETURNING balance INTO v_new_balance;
+
+    INSERT INTO wallet_transactions (
+        driver_id, trip_id, type, category,
+        amount, balance_after, description
+    ) VALUES (
+        p_driver_id, p_trip_id, 'credit', 'trip_earning',
+        p_amount, v_new_balance, 'Trip earning credited'
+    );
+END;
+$$;
+
+-- ============================================================
+-- NEARBY DRIVER SEARCH  (Haversine — upgrade to PostGIS later)
+-- ============================================================
+CREATE OR REPLACE FUNCTION nearby_drivers(
+    lat        DOUBLE PRECISION,
+    lng        DOUBLE PRECISION,
+    radius_km  DOUBLE PRECISION DEFAULT 5,
+    v_type     vehicle_type     DEFAULT 'cab'
+)
+RETURNS TABLE (driver_id UUID, distance_km DOUBLE PRECISION)
+LANGUAGE sql STABLE AS $$
+    SELECT driver_id, distance_km
+    FROM (
+        SELECT
+            dl.driver_id,
+            (6371 * acos(LEAST(1,
+                cos(radians(lat)) * cos(radians(dl.latitude))
+                * cos(radians(dl.longitude) - radians(lng))
+                + sin(radians(lat)) * sin(radians(dl.latitude))
+            ))) AS distance_km
+        FROM driver_locations dl
+        JOIN drivers d ON d.id = dl.driver_id
+        WHERE d.status       = 'approved'
+          AND d.duty_status  = 'on_duty'
+          AND d.vehicle_type = v_type
+          AND dl.updated_at  > NOW() - INTERVAL '2 minutes'
+    ) sub
+    WHERE distance_km <= radius_km
+    ORDER BY distance_km ASC
+    LIMIT 20;
+$$;
+
+INSERT INTO storage.buckets (id, name, public)
+VALUES ('driver-documents','driver-documents',false)
+ON CONFLICT (id) DO NOTHING;
+
+CREATE POLICY storage_driver_update ON storage.objects FOR UPDATE
+    USING (
+        bucket_id = 'driver-documents'
+        AND (storage.foldername(name))[1] = current_driver_id()::TEXT
+    )
+    WITH CHECK (
+        bucket_id = 'driver-documents'
+        AND (storage.foldername(name))[1] = current_driver_id()::TEXT
+    );
+
+CREATE POLICY storage_driver_delete ON storage.objects FOR DELETE
+    USING (
+        bucket_id = 'driver-documents'
+        AND (storage.foldername(name))[1] = current_driver_id()::TEXT
+    );
+
+-- Automatically creates a driver_wallets row when a new driver is inserted.
+-- Run this in Supabase SQL Editor.
+-- Runs as SECURITY DEFINER so it bypasses RLS.
+
+CREATE OR REPLACE FUNCTION create_driver_wallet()
+RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER AS $$
+BEGIN
+    INSERT INTO driver_wallets (driver_id, balance, total_earned, total_paid)
+    VALUES (NEW.id, 0.00, 0.00, 0.00)
+    ON CONFLICT (driver_id) DO NOTHING;
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_create_driver_wallet ON drivers;
+CREATE TRIGGER trg_create_driver_wallet
+    AFTER INSERT ON drivers
+    FOR EACH ROW
+    EXECUTE FUNCTION create_driver_wallet();
+
+
+CREATE OR REPLACE FUNCTION accept_ride(
+    p_driver_id  UUID,
+    p_request_id UUID,
+    p_vehicle_id UUID DEFAULT NULL
+)
+RETURNS JSON
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_request  ride_requests%ROWTYPE;
+    v_driver   drivers%ROWTYPE;
+    v_trip_id  UUID;
+BEGIN
+    -- 1. Lock and fetch the ride request
+    SELECT * INTO v_request
+    FROM ride_requests
+    WHERE id = p_request_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RETURN json_build_object('success', false, 'error', 'Ride request not found');
+    END IF;
+
+    -- 2. Check request is still open
+    IF v_request.status != 'searching' THEN
+        RETURN json_build_object('success', false, 'error', 'Ride already accepted or no longer available');
+    END IF;
+
+    -- 3. Check request has not expired
+    IF v_request.expires_at < NOW() THEN
+        UPDATE ride_requests SET status = 'expired' WHERE id = p_request_id;
+        RETURN json_build_object('success', false, 'error', 'Ride request has expired');
+    END IF;
+
+    -- 4. Validate driver
+    SELECT * INTO v_driver
+    FROM drivers
+    WHERE id = p_driver_id;
+
+    IF NOT FOUND THEN
+        RETURN json_build_object('success', false, 'error', 'Driver not found');
+    END IF;
+
+    IF v_driver.status != 'approved' THEN
+        RETURN json_build_object('success', false, 'error', 'Driver is not approved');
+    END IF;
+
+    IF v_driver.duty_status != 'on_duty' THEN
+        RETURN json_build_object('success', false, 'error', 'Driver is not on duty');
+    END IF;
+
+    IF v_driver.vehicle_type != v_request.vehicle_type THEN
+        RETURN json_build_object('success', false, 'error', 'Vehicle type mismatch');
+    END IF;
+
+    -- 5. Mark request as accepted
+    UPDATE ride_requests
+    SET status = 'accepted'
+    WHERE id = p_request_id;
+
+    -- 6. Create the trip
+    INSERT INTO trips (
+        request_id,
+        rider_id,
+        driver_id,
+        vehicle_id,
+        vehicle_type,
+        status,
+        pickup_lat,
+        pickup_lng,
+        pickup_address,
+        drop_lat,
+        drop_lng,
+        drop_address,
+        distance_km,
+        fare,
+        accepted_at
+    ) VALUES (
+        p_request_id,
+        v_request.rider_id,
+        p_driver_id,
+        p_vehicle_id,
+        v_request.vehicle_type,
+        'accepted',
+        v_request.pickup_lat,
+        v_request.pickup_lng,
+        v_request.pickup_address,
+        v_request.drop_lat,
+        v_request.drop_lng,
+        v_request.drop_address,
+        v_request.distance_km,
+        v_request.estimated_fare,
+        NOW()
+    )
+    RETURNING id INTO v_trip_id;
+
+    -- 7. Return success with trip id
+    RETURN json_build_object(
+        'success',  true,
+        'trip_id',  v_trip_id,
+        'rider_id', v_request.rider_id
+    );
+
+EXCEPTION WHEN OTHERS THEN
+    RETURN json_build_object('success', false, 'error', SQLERRM);
+END;
+$$;
+
+-- Remaining driver flow migration
+-- Adds OTP and UPI support + trip completion RPC with wallet credit.
+
+ALTER TABLE trips
+ADD COLUMN IF NOT EXISTS otp TEXT;
+
+ALTER TABLE drivers
+ADD COLUMN IF NOT EXISTS upi_id TEXT;
+
+CREATE OR REPLACE FUNCTION complete_trip(
+    p_trip_id UUID,
+    p_final_fare NUMERIC,
+    p_payment_status TEXT DEFAULT 'pending'
+)
+RETURNS JSON
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+    v_trip          trips%ROWTYPE;
+    v_gross_fare    NUMERIC(10,2);
+    v_commission    NUMERIC(10,2);
+    v_net_earning   NUMERIC(10,2);
+BEGIN
+    IF p_payment_status NOT IN ('pending', 'paid', 'failed') THEN
+        RETURN json_build_object('success', false, 'error', 'Invalid payment status');
+    END IF;
+
+    SELECT * INTO v_trip
+    FROM trips
+    WHERE id = p_trip_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RETURN json_build_object('success', false, 'error', 'Trip not found');
+    END IF;
+
+    IF v_trip.status = 'completed' THEN
+        RETURN json_build_object('success', true, 'trip_id', v_trip.id, 'already_completed', true);
+    END IF;
+
+    IF v_trip.status = 'cancelled' THEN
+        RETURN json_build_object('success', false, 'error', 'Cancelled trip cannot be completed');
+    END IF;
+
+    v_gross_fare := COALESCE(p_final_fare, v_trip.fare, 0)::NUMERIC(10,2);
+    v_commission := ROUND((v_gross_fare * 0.20)::NUMERIC, 2);
+    v_net_earning := (v_gross_fare - v_commission)::NUMERIC(10,2);
+
+    UPDATE trips
+    SET status = 'completed',
+        completed_at = NOW(),
+        final_fare = v_gross_fare,
+        payment_status = p_payment_status
+    WHERE id = p_trip_id;
+
+    INSERT INTO driver_earnings (
+        driver_id,
+        trip_id,
+        gross_fare,
+        commission_pct,
+        commission_amt,
+        net_earning
+    ) VALUES (
+        v_trip.driver_id,
+        p_trip_id,
+        v_gross_fare,
+        20.00,
+        v_commission,
+        v_net_earning
+    )
+    ON CONFLICT (trip_id) DO NOTHING;
+
+    PERFORM credit_driver_wallet(v_trip.driver_id, p_trip_id, v_net_earning);
+
+    RETURN json_build_object(
+        'success', true,
+        'trip_id', p_trip_id,
+        'gross_fare', v_gross_fare,
+        'commission', v_commission,
+        'net_earning', v_net_earning
+    );
+
+EXCEPTION WHEN OTHERS THEN
+    RETURN json_build_object('success', false, 'error', SQLERRM);
+END;
+$$;
+
+
+-- Run this in Supabase SQL Editor.
+-- Adds accepted_terms and whatsapp_opt_in columns to drivers table.
+
+ALTER TABLE drivers
+ADD COLUMN IF NOT EXISTS accepted_terms BOOLEAN NOT NULL DEFAULT FALSE;
+
+ALTER TABLE drivers
+ADD COLUMN IF NOT EXISTS whatsapp_opt_in BOOLEAN NOT NULL DEFAULT FALSE;
+
+
