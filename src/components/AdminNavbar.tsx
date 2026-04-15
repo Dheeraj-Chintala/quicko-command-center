@@ -1,4 +1,4 @@
-import { Bell, LogOut, User, ClipboardList } from 'lucide-react';
+import { Bell, LogOut, User, ClipboardList, Menu } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { useDataSource } from '@/contexts/DataSourceContext';
 import { Button } from '@/components/ui/button';
@@ -12,9 +12,10 @@ import { Link, useNavigate } from 'react-router-dom';
 
 interface AdminNavbarProps {
   sidebarCollapsed: boolean;
+  onOpenMobileMenu: () => void;
 }
 
-export const AdminNavbar = ({ sidebarCollapsed }: AdminNavbarProps) => {
+export const AdminNavbar = ({ sidebarCollapsed, onOpenMobileMenu }: AdminNavbarProps) => {
   const { user, signOut } = useAuth();
   const { isLive, setMode } = useDataSource();
   const navigate = useNavigate();
@@ -40,15 +41,25 @@ export const AdminNavbar = ({ sidebarCollapsed }: AdminNavbarProps) => {
 
   return (
     <header
-      className={`fixed top-0 right-0 h-16 bg-card brutal-border border-t-0 border-r-0 z-30 flex items-center justify-between px-6 transition-all duration-200 ${
-        sidebarCollapsed ? 'left-16' : 'left-60'
+      className={`fixed top-0 right-0 z-30 flex h-16 items-center justify-between gap-2 border-t-0 border-r-0 bg-card brutal-border px-3 transition-all duration-200 md:px-6 ${
+        sidebarCollapsed ? "left-0 md:left-16" : "left-0 md:left-60"
       }`}
     >
-      <h2 className="font-heading font-bold text-lg text-foreground">
-        Admin Panel
-      </h2>
+      <div className="flex min-w-0 flex-1 items-center gap-2">
+        <button
+          type="button"
+          className="flex h-10 w-10 shrink-0 items-center justify-center rounded-sm brutal-border transition-colors hover:bg-secondary md:hidden"
+          onClick={onOpenMobileMenu}
+          aria-label="Open menu"
+        >
+          <Menu className="h-5 w-5 text-foreground" strokeWidth={2.5} />
+        </button>
+        <h2 className="min-w-0 truncate font-heading text-lg font-bold text-foreground">
+          Admin Panel
+        </h2>
+      </div>
 
-      <div className="flex items-center gap-3">
+      <div className="flex shrink-0 items-center gap-1.5 sm:gap-3">
         <div className="flex items-center gap-2 mr-1">
           <Label
             htmlFor="data-source-switch"

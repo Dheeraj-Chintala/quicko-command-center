@@ -12,7 +12,7 @@ export function TableSearchInput({ className, placeholder = "Search rows…", ..
       type="search"
       placeholder={placeholder}
       aria-label="Search table rows"
-      className={cn("max-w-md brutal-input", className)}
+      className={cn("w-full max-w-none sm:max-w-md brutal-input", className)}
       {...props}
     />
   );
