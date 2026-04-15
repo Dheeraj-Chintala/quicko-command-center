@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 import { Button } from '@/components/ui/button';
-import { Car, AlertTriangle, Loader2 } from 'lucide-react';
+import { AlertTriangle, Loader2 } from 'lucide-react';
 
 const Login = () => {
   const [email, setEmail] = useState('');
@@ -35,9 +35,15 @@ const Login = () => {
       <div className="w-full max-w-md">
         {/* Logo */}
         <div className="text-center mb-8">
-          <div className="inline-flex items-center gap-3 brutal-card p-4 bg-primary">
-            <Car className="h-8 w-8 text-primary-foreground" strokeWidth={2.5} />
-            <h1 className="text-3xl font-heading font-bold text-primary-foreground tracking-tight">
+          <div className="inline-flex flex-col items-center gap-3 brutal-card p-6 bg-card">
+            <img
+              src="/Quicko-app-logo.png"
+              alt="Quicko"
+              className="h-24 w-auto max-w-[200px] object-contain"
+              width={200}
+              height={96}
+            />
+            <h1 className="text-2xl font-heading font-bold text-foreground tracking-tight">
               QUICKO
             </h1>
           </div>

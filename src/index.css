@@ -46,7 +46,7 @@
     --radius: 0.375rem;
 
     /* Neubrutalism tokens */
-    --border-width: 2.5px;
+    --border-width: 1.25px;
     --shadow-offset: 4px;
     --shadow-brutal: var(--shadow-offset) var(--shadow-offset) 0px 0px hsl(0 0% 0%);
     --shadow-brutal-sm: 2px 2px 0px 0px hsl(0 0% 0%);

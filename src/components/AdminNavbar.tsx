@@ -1,7 +1,14 @@
-import { Bell, LogOut, User } from 'lucide-react';
+import { Bell, LogOut, User, ClipboardList } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
+import { useDataSource } from '@/contexts/DataSourceContext';
 import { Button } from '@/components/ui/button';
-import { useNavigate } from 'react-router-dom';
+import { Switch } from '@/components/ui/switch';
+import { Label } from '@/components/ui/label';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { Skeleton } from '@/components/ui/skeleton';
+import { usePendingApprovals } from '@/hooks/useDashboardData';
+import { mockPendingApprovals } from '@/lib/dashboardMockData';
+import { Link, useNavigate } from 'react-router-dom';
 
 interface AdminNavbarProps {
   sidebarCollapsed: boolean;
@@ -9,7 +16,22 @@ interface AdminNavbarProps {
 
 export const AdminNavbar = ({ sidebarCollapsed }: AdminNavbarProps) => {
   const { user, signOut } = useAuth();
+  const { isLive, setMode } = useDataSource();
   const navigate = useNavigate();
+  const pendingQ = usePendingApprovals();
+
+  const notificationItems = !isLive
+    ? mockPendingApprovals.map((a, i) => ({
+        id: `demo-${i}`,
+        driverId: `demo-${i}`,
+        name: a.name,
+        docType: a.docType,
+        city: a.city,
+      }))
+    : (pendingQ.data ?? []);
+  const pendingLoading = isLive && pendingQ.isLoading;
+  const pendingError = isLive && pendingQ.isError;
+  const pendingCount = notificationItems.length;
 
   const handleSignOut = async () => {
     await signOut();
@@ -27,13 +49,95 @@ export const AdminNavbar = ({ sidebarCollapsed }: AdminNavbarProps) => {
       </h2>
 
       <div className="flex items-center gap-3">
-        {/* Notifications */}
-        <button className="relative h-10 w-10 brutal-border rounded-sm flex items-center justify-center hover:bg-secondary transition-colors brutal-shadow-sm brutal-btn">
-          <Bell className="h-5 w-5 text-foreground" strokeWidth={2.5} />
-          <span className="absolute -top-1 -right-1 h-4 w-4 bg-primary rounded-full text-[10px] font-bold text-primary-foreground flex items-center justify-center">
-            3
-          </span>
-        </button>
+        <div className="flex items-center gap-2 mr-1">
+          <Label
+            htmlFor="data-source-switch"
+            className="text-xs font-heading font-bold text-muted-foreground cursor-pointer whitespace-nowrap"
+          >
+            <span className="sm:hidden">{isLive ? 'Live' : 'Demo'}</span>
+            <span className="hidden sm:inline">{isLive ? 'Live (Supabase)' : 'Demo'}</span>
+          </Label>
+          <Switch
+            id="data-source-switch"
+            checked={isLive}
+            onCheckedChange={(checked) => setMode(checked ? 'live' : 'demo')}
+            aria-label="Toggle between live Supabase data and demo data"
+          />
+        </div>
+
+        {/* Notifications — pending driver documents (same source as dashboard widget) */}
+        <Popover>
+          <PopoverTrigger asChild>
+            <button
+              type="button"
+              className="relative h-10 w-10 brutal-border rounded-sm flex items-center justify-center hover:bg-secondary transition-colors brutal-shadow-sm brutal-btn"
+              aria-label={`Notifications${pendingCount ? `, ${pendingCount} pending` : ''}`}
+            >
+              <Bell className="h-5 w-5 text-foreground" strokeWidth={2.5} />
+              {pendingCount > 0 ? (
+                <span className="absolute -top-1 -right-1 min-h-4 min-w-4 px-0.5 bg-primary rounded-full text-[10px] font-bold text-primary-foreground flex items-center justify-center tabular-nums">
+                  {pendingCount > 99 ? '99+' : pendingCount}
+                </span>
+              ) : null}
+            </button>
+          </PopoverTrigger>
+          <PopoverContent align="end" className="w-80 sm:w-96 p-0 brutal-border">
+            <div className="border-b border-foreground px-3 py-2.5 flex items-center gap-2 bg-secondary/40">
+              <ClipboardList className="h-4 w-4 text-foreground shrink-0" strokeWidth={2.5} />
+              <span className="font-heading font-bold text-sm text-foreground">Alerts</span>
+              {!isLive && (
+                <span className="text-[10px] font-heading font-bold uppercase text-muted-foreground ml-auto">
+                  Demo data
+                </span>
+              )}
+            </div>
+            <div className="max-h-80 overflow-y-auto p-2">
+              {pendingLoading ? (
+                <div className="space-y-2 p-1">
+                  {Array.from({ length: 4 }).map((_, i) => (
+                    <Skeleton key={i} className="h-14 w-full rounded-sm" />
+                  ))}
+                </div>
+              ) : pendingError ? (
+                <p className="text-sm text-destructive font-body px-2 py-6 text-center">
+                  Could not load notifications. Check your connection and Supabase access.
+                </p>
+              ) : pendingCount === 0 ? (
+                <p className="text-sm text-muted-foreground font-body px-2 py-6 text-center">
+                  No pending document reviews. You’re all caught up.
+                </p>
+              ) : (
+                <ul className="space-y-1">
+                  {notificationItems.map((item) => (
+                    <li key={item.id}>
+                      <Link
+                        to={`/driver-applications/${item.driverId}`}
+                        className="block rounded-sm px-2 py-2 hover:bg-secondary transition-colors brutal-border border-transparent hover:border-foreground"
+                      >
+                        <p className="font-heading font-bold text-sm text-foreground leading-tight">
+                          {item.name}
+                        </p>
+                        <p className="text-xs text-muted-foreground mt-0.5">
+                          {item.docType} · {item.city}
+                        </p>
+                        <span className="text-[11px] font-heading font-semibold text-primary mt-1 inline-block">
+                          Review →
+                        </span>
+                      </Link>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            {pendingCount > 0 ? (
+              <div className="border-t border-foreground p-2">
+                <Button variant="outline" size="sm" className="w-full font-heading" asChild>
+                  <Link to="/driver-applications">Open driver applications</Link>
+                </Button>
+              </div>
+            ) : null}
+          </PopoverContent>
+        </Popover>
 
         {/* Admin Avatar */}
         <div className="brutal-border rounded-sm h-10 px-3 flex items-center gap-2 bg-secondary">

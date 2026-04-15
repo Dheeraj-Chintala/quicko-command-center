@@ -5,6 +5,24 @@ import type { Database } from './types';
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_PUBLISHABLE_KEY = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY;
 
+// #region agent log
+fetch("http://127.0.0.1:7899/ingest/a1ec8467-4b16-48b8-9ae7-709fd1526de3", {
+  method: "POST",
+  headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "2a0541" },
+  body: JSON.stringify({
+    sessionId: "2a0541",
+    location: "client.ts:env",
+    message: "supabase env before createClient",
+    data: {
+      hasUrl: Boolean(SUPABASE_URL && String(SUPABASE_URL).length > 0),
+      hasKey: Boolean(SUPABASE_PUBLISHABLE_KEY && String(SUPABASE_PUBLISHABLE_KEY).length > 0),
+    },
+    timestamp: Date.now(),
+    hypothesisId: "H2",
+  }),
+}).catch(() => {});
+// #endregion
+
 // Import the supabase client like this:
 // import { supabase } from "@/integrations/supabase/client";
 
